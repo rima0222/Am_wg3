@@ -149,6 +149,14 @@ function renderStatus(s) {
 
   const timeText = document.getElementById("p-time-text");
   timeText.textContent = s.remaining_days !== null ? `${s.remaining_days} day(s) left` : "unlimited";
+
+  const ipv6Row = document.getElementById("p-ipv6-row");
+  if (s.ipv6_address) {
+    ipv6Row.style.display = "";
+    document.getElementById("p-ipv6-text").textContent = s.ipv6_address;
+  } else {
+    ipv6Row.style.display = "none";
+  }
 }
 
 async function showConfig() {

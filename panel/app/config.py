@@ -54,7 +54,13 @@ CLIENT_MTU = get("AWG_CLIENT_MTU", "1280")
 DB_PATH = get("PANEL_DB_PATH", "/etc/awg-panel/panel.db")
 JWT_SECRET = get("PANEL_JWT_SECRET", "change-me")
 PANEL_PORT = int(get("PANEL_PORT", "8787"))
-SEED_ADMIN_USERNAME = get("PANEL_ADMIN_USER", "admin")
-SEED_ADMIN_PASSWORD_HASH = get("PANEL_ADMIN_PASSWORD_HASH", "")
+ADMIN_USERNAME = get("PANEL_ADMIN_USER", "admin")
+ADMIN_PASSWORD_HASH = get("PANEL_ADMIN_PASSWORD_HASH", "")
 STATS_POLL_INTERVAL = float(get("PANEL_STATS_INTERVAL", "2"))
 ONLINE_THRESHOLD_SECONDS = int(get("PANEL_ONLINE_THRESHOLD", "150"))
+
+# IPv6 (dual-stack) - only meaningful if the server has a real IPv6 uplink;
+# install.sh auto-detects this and sets AWG_ENABLE_IPV6 accordingly.
+ENABLE_IPV6 = get("AWG_ENABLE_IPV6", "0") == "1"
+SERVER_SUBNET6 = get("AWG_SUBNET6", "fd42:29:29::/64")
+SERVER_ADDRESS6 = get("AWG_ADDRESS6", "fd42:29:29::1/64")

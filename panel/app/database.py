@@ -65,6 +65,7 @@ def init_db():
             ("peers", "duration_days", "INTEGER"),
             ("peers", "portal_username", "TEXT"),
             ("peers", "portal_password_hash", "TEXT"),
+            ("peers", "ipv6_address", "TEXT"),
         ]
         for table, col, col_type in migrations:
             if not _column_exists(table, col):

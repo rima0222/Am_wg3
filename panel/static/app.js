@@ -160,7 +160,10 @@ async function loadPeers() {
         <span class="name">${escapeHtml(p.name)}</span>
         ${p.note ? `<div class="note">${escapeHtml(p.note)}</div>` : ""}
       </td>
-      <td class="mono">${p.ip_address}</td>
+      <td class="mono">
+        ${p.ip_address}
+        ${p.ipv6_address ? `<div class="note">${p.ipv6_address}</div>` : ""}
+      </td>
       <td>
         <div class="usage-bar-wrap">
           <span class="usage-numbers">${fmtBytes(p.used_bytes)} ${p.data_limit_bytes ? "/ " + fmtBytes(p.data_limit_bytes) : "· unlimited"}</span>

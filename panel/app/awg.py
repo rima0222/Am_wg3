@@ -38,7 +38,10 @@ def genpsk() -> str:
     return _run(["awg", "genpsk"])
 
 
-def add_peer_live(public_key: str, preshared_key: str, ip_address: str):
+def add_peer_live(public_key: str, preshared_key: str, ip_address: str, ipv6_address: str = None):
+    allowed_ips = f"{ip_address}/32"
+    if ipv6_address:
+        allowed_ips += f",{ipv6_address}/128"
     with tempfile.NamedTemporaryFile("w", delete=False) as f:
         f.write(preshared_key + "\n")
         psk_path = f.name
@@ -53,7 +56,7 @@ def add_peer_live(public_key: str, preshared_key: str, ip_address: str):
                 "preshared-key",
                 psk_path,
                 "allowed-ips",
-                f"{ip_address}/32",
+                allowed_ips,
             ]
         )
     finally:
@@ -109,13 +112,16 @@ def sync_conf_from_file():
         os.unlink(tmp_path)
 
 
-def append_peer_to_conf(public_key: str, preshared_key: str, ip_address: str, name: str):
+def append_peer_to_conf(public_key: str, preshared_key: str, ip_address: str, name: str, ipv6_address: str = None):
+    allowed_ips = f"{ip_address}/32"
+    if ipv6_address:
+        allowed_ips += f", {ipv6_address}/128"
     block = (
         f"\n# peer: {name}\n"
         f"[Peer]\n"
         f"PublicKey = {public_key}\n"
         f"PresharedKey = {preshared_key}\n"
-        f"AllowedIPs = {ip_address}/32\n"
+        f"AllowedIPs = {allowed_ips}\n"
     )
     with open(config.WG_CONF_PATH, "a") as f:
         f.write(block)
@@ -137,10 +143,14 @@ def build_client_config(
     client_private_key: str,
     client_ip: str,
     preshared_key: str,
+    client_ipv6: str = None,
 ) -> str:
+    address_line = f"{client_ip}/32"
+    if client_ipv6:
+        address_line += f", {client_ipv6}/128"
     return f"""[Interface]
 PrivateKey = {client_private_key}
-Address = {client_ip}/32
+Address = {address_line}
 DNS = {config.DNS_SERVERS}
 MTU = {config.CLIENT_MTU}
 Jc = {config.AWG_JC}

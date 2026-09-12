@@ -109,13 +109,26 @@ net.ipv4.udp_mem = 65536 131072 262144
 EOF
 sysctl --system >/dev/null
 
-# ---------- 4. detect outbound interface ----------
+# ---------- 4. detect outbound interface(s) ----------
 DEFAULT_IFACE="$(ip route show default | awk '/default/ {print $5; exit}')"
 if [ -z "$DEFAULT_IFACE" ]; then
   err "Could not detect the default network interface."
   exit 1
 fi
-log "Outbound network interface: ${DEFAULT_IFACE}"
+log "Outbound network interface (IPv4): ${DEFAULT_IFACE}"
+
+ENABLE_IPV6=0
+DEFAULT_IFACE6=""
+if ip -6 route show default 2>/dev/null | grep -q default; then
+  DEFAULT_IFACE6="$(ip -6 route show default | awk '/default/ {print $5; exit}')"
+  if [ -n "$DEFAULT_IFACE6" ]; then
+    ENABLE_IPV6=1
+    log "Native IPv6 uplink detected (${DEFAULT_IFACE6}) - enabling dual-stack for clients."
+  fi
+fi
+if [ "$ENABLE_IPV6" = "0" ]; then
+  log "No IPv6 uplink detected - clients will be IPv4-only (this is normal on most VPS providers)."
+fi
 
 # ---------- 5. server keys + anti-DPI obfuscation params ----------
 log "Generating keys and anti-DPI obfuscation parameters..."
@@ -144,15 +157,34 @@ S2="$(random_int 15 60)"
 
 AWG_SUBNET="10.29.29.0/24"
 AWG_ADDRESS="10.29.29.1/24"
+AWG_SUBNET6="fd42:29:29::/64"
+AWG_ADDRESS6="fd42:29:29::1/64"
 AWG_DNS="1.1.1.1, 8.8.8.8"
 CLIENT_MTU="1280"
+
+if [ "$ENABLE_IPV6" = "1" ]; then
+  ADDRESS_LINE="${AWG_ADDRESS}, ${AWG_ADDRESS6}"
+else
+  ADDRESS_LINE="${AWG_ADDRESS}"
+fi
+
+IPV6_POSTUP=""
+IPV6_POSTDOWN=""
+if [ "$ENABLE_IPV6" = "1" ]; then
+  IPV6_POSTUP="PostUp = ip6tables -t nat -A POSTROUTING -s ${AWG_SUBNET6} -o ${DEFAULT_IFACE6} -j MASQUERADE
+PostUp = ip6tables -A FORWARD -i ${IFACE} -j ACCEPT
+PostUp = ip6tables -A FORWARD -o ${IFACE} -j ACCEPT"
+  IPV6_POSTDOWN="PostDown = ip6tables -t nat -D POSTROUTING -s ${AWG_SUBNET6} -o ${DEFAULT_IFACE6} -j MASQUERADE
+PostDown = ip6tables -D FORWARD -i ${IFACE} -j ACCEPT
+PostDown = ip6tables -D FORWARD -o ${IFACE} -j ACCEPT"
+fi
 
 # ---------- 6. server interface config ----------
 log "Writing ${CONF_PATH} ..."
 cat > "$CONF_PATH" <<EOF
 [Interface]
 PrivateKey = ${SERVER_PRIVATE_KEY}
-Address = ${AWG_ADDRESS}
+Address = ${ADDRESS_LINE}
 ListenPort = ${WG_PORT}
 Jc = ${JC}
 Jmin = ${JMIN}
@@ -168,10 +200,12 @@ PostUp = iptables -t nat -A POSTROUTING -s ${AWG_SUBNET} -o ${DEFAULT_IFACE} -j 
 PostUp = iptables -A FORWARD -i ${IFACE} -j ACCEPT
 PostUp = iptables -A FORWARD -o ${IFACE} -j ACCEPT
 PostUp = iptables -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+${IPV6_POSTUP}
 PostDown = iptables -t nat -D POSTROUTING -s ${AWG_SUBNET} -o ${DEFAULT_IFACE} -j MASQUERADE
 PostDown = iptables -D FORWARD -i ${IFACE} -j ACCEPT
 PostDown = iptables -D FORWARD -o ${IFACE} -j ACCEPT
 PostDown = iptables -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+${IPV6_POSTDOWN}
 EOF
 chmod 600 "$CONF_PATH"
 
@@ -212,6 +246,15 @@ log "Writing panel configuration..."
 mkdir -p "$ETC_DIR"
 chmod 700 "$ETC_DIR"
 
+log "Generating a self-signed TLS certificate for the panel (protects the admin login in transit)..."
+openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout "${ETC_DIR}/key.pem" \
+  -out "${ETC_DIR}/cert.pem" \
+  -days 3650 \
+  -subj "/CN=${SERVER_ENDPOINT}" >/dev/null 2>&1
+chmod 600 "${ETC_DIR}/key.pem"
+chmod 644 "${ETC_DIR}/cert.pem"
+
 PASSWORD_HASH="$("${INSTALL_DIR}/venv/bin/python3" - "$ADMIN_PASS" <<'PYEOF'
 import sys, hashlib, os
 password = sys.argv[1]
@@ -228,6 +271,9 @@ AWG_INTERFACE=${IFACE}
 AWG_CONF_PATH=${CONF_PATH}
 AWG_SUBNET=${AWG_SUBNET}
 AWG_ADDRESS=${AWG_ADDRESS}
+AWG_ENABLE_IPV6=${ENABLE_IPV6}
+AWG_SUBNET6=${AWG_SUBNET6}
+AWG_ADDRESS6=${AWG_ADDRESS6}
 AWG_ENDPOINT=${SERVER_ENDPOINT}
 AWG_PORT=${WG_PORT}
 AWG_SERVER_PUBLIC_KEY=${SERVER_PUBLIC_KEY}
@@ -267,7 +313,7 @@ Wants=awg-quick@${IFACE}.service
 Type=simple
 EnvironmentFile=${ETC_DIR}/panel.env
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port \${PANEL_PORT} --app-dir ${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port \${PANEL_PORT} --app-dir ${INSTALL_DIR} --ssl-keyfile ${ETC_DIR}/key.pem --ssl-certfile ${ETC_DIR}/cert.pem
 Restart=always
 RestartSec=3
 User=root
@@ -290,12 +336,22 @@ echo ""
 echo "=================================================================="
 echo "Installation complete."
 echo "=================================================================="
-echo "Panel:            http://${SERVER_ENDPOINT}:${PANEL_PORT}"
-echo "User portal:      http://${SERVER_ENDPOINT}:${PANEL_PORT}/portal"
+echo "Panel:            https://${SERVER_ENDPOINT}:${PANEL_PORT}"
+echo "User portal:      https://${SERVER_ENDPOINT}:${PANEL_PORT}/portal"
 echo "Admin username:   ${ADMIN_USER}"
 echo "Admin password:   ${ADMIN_PASS}"
 echo "------------------------------------------------------------------"
+echo "NOTE: the panel uses a self-signed TLS certificate (to keep your"
+echo "login password from being sent in plaintext). Your browser will"
+echo "show a security warning on first visit - this is expected; click"
+echo "'Advanced > Proceed' to continue. Do this once before using /portal"
+echo "from another site (e.g. GitHub Pages), or its requests will fail."
 echo "Interface: ${IFACE}   Port: ${WG_PORT}"
+if [ "$ENABLE_IPV6" = "1" ]; then
+  echo "IPv6:      enabled (${AWG_SUBNET6})"
+else
+  echo "IPv6:      not available on this server (IPv4-only)"
+fi
 echo "Tunnel status:  awg show ${IFACE}"
 echo "Panel logs:     journalctl -u awg-panel -f"
 echo ""

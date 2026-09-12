@@ -2,9 +2,10 @@ import asyncio
 import ipaddress
 import qrcode
 import io
+import time
 import psutil
 from pathlib import Path
-from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi import FastAPI, Depends, HTTPException, Body, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,53 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============================================================
+# brute-force protection for login endpoints (in-memory, per-IP)
+# ============================================================
+_login_attempts: dict = {}
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 300    # 5 minutes to accumulate failures
+LOGIN_BLOCK_SECONDS = 900     # 15 minute lockout once tripped
+
+
+def _client_key(prefix: str, request: Request) -> str:
+    ip = request.client.host if request.client else "unknown"
+    return f"{prefix}:{ip}"
+
+
+def _check_rate_limit(key: str):
+    now = time.time()
+    entry = _login_attempts.get(key)
+    if entry and entry.get("blocked_until", 0) > now:
+        retry_after = int(entry["blocked_until"] - now)
+        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {retry_after}s.")
+
+
+def _record_failure(key: str):
+    now = time.time()
+    entry = _login_attempts.get(key)
+    if not entry or now - entry["first"] > LOGIN_WINDOW_SECONDS:
+        entry = {"count": 0, "first": now}
+    entry["count"] += 1
+    if entry["count"] >= LOGIN_MAX_ATTEMPTS:
+        entry["blocked_until"] = now + LOGIN_BLOCK_SECONDS
+    _login_attempts[key] = entry
+
+
+def _record_success(key: str):
+    _login_attempts.pop(key, None)
+
+
+def _cleanup_rate_limits():
+    now = time.time()
+    stale = [
+        k
+        for k, v in _login_attempts.items()
+        if now - v["first"] > LOGIN_WINDOW_SECONDS and v.get("blocked_until", 0) < now
+    ]
+    for k in stale:
+        _login_attempts.pop(k, None)
 
 
 # ============================================================
@@ -77,6 +125,17 @@ def _subnet_base() -> str:
     return ".".join(parts[:3])
 
 
+def _derive_ipv6(ipv4_address: str) -> Optional[str]:
+    """Derives a matching IPv6 address in the server's ULA range from the
+    IPv4 host octet, e.g. 10.29.29.42 -> fd42:29:29::2a. Returns None if
+    IPv6 wasn't enabled at install time (no native uplink detected)."""
+    if not config.ENABLE_IPV6:
+        return None
+    host_octet = int(ipv4_address.split(".")[-1])
+    base_net = config.SERVER_SUBNET6.split("/")[0]
+    return f"{base_net}{format(host_octet, 'x')}"
+
+
 def _get_admin_row():
     with database.cursor() as cur:
         cur.execute("SELECT * FROM admin WHERE id=1")
@@ -87,12 +146,16 @@ def _get_admin_row():
 # admin auth
 # ============================================================
 @app.post("/api/login")
-def login(body: LoginRequest):
+def login(body: LoginRequest, request: Request):
+    key = _client_key("admin", request)
+    _check_rate_limit(key)
     row = _get_admin_row()
     if not row or body.username != row["username"] or not auth.verify_password(
         body.password, row["password_hash"]
     ):
+        _record_failure(key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    _record_success(key)
     return {"token": auth.create_admin_token(row["username"])}
 
 
@@ -136,6 +199,7 @@ def list_peers(_=Depends(auth.require_admin)):
                     "id": row["id"],
                     "name": row["name"],
                     "ip_address": row["ip_address"],
+                    "ipv6_address": row["ipv6_address"],
                     "note": row["note"],
                     "enabled": bool(row["enabled"]),
                     "created_at": row["created_at"],
@@ -160,6 +224,7 @@ def create_peer(body: CreatePeerRequest, _=Depends(auth.require_admin)):
         used_ips = {r["ip_address"] for r in cur.fetchall()}
 
     ip_address = database.next_free_ip(_subnet_base(), used_ips)
+    ipv6_address = _derive_ipv6(ip_address)
     private_key = awg.genkey()
     public_key = awg.pubkey(private_key)
     preshared_key = awg.genpsk()
@@ -172,16 +237,17 @@ def create_peer(body: CreatePeerRequest, _=Depends(auth.require_admin)):
     with database.cursor() as cur:
         cur.execute(
             """INSERT INTO peers
-               (name, public_key, private_key, preshared_key, ip_address, note,
+               (name, public_key, private_key, preshared_key, ip_address, ipv6_address, note,
                 enabled, created_at, expires_at, data_limit_bytes, duration_days,
                 portal_username, portal_password_hash)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
             (
                 body.name,
                 public_key,
                 private_key,
                 preshared_key,
                 ip_address,
+                ipv6_address,
                 body.note or "",
                 database.now(),
                 body.expires_at,
@@ -194,13 +260,14 @@ def create_peer(body: CreatePeerRequest, _=Depends(auth.require_admin)):
         peer_id = cur.lastrowid
         cur.execute("INSERT INTO peer_stats (peer_id) VALUES (?)", (peer_id,))
 
-    awg.add_peer_live(public_key, preshared_key, ip_address)
-    awg.append_peer_to_conf(public_key, preshared_key, ip_address, body.name)
+    awg.add_peer_live(public_key, preshared_key, ip_address, ipv6_address)
+    awg.append_peer_to_conf(public_key, preshared_key, ip_address, body.name, ipv6_address)
 
-    client_conf = awg.build_client_config(private_key, ip_address, preshared_key)
+    client_conf = awg.build_client_config(private_key, ip_address, preshared_key, ipv6_address)
     return {
         "id": peer_id,
         "ip_address": ip_address,
+        "ipv6_address": ipv6_address,
         "config": client_conf,
         "portal_username": portal_username,
         "portal_password": portal_password,  # shown once, plaintext
@@ -230,7 +297,7 @@ def update_peer(peer_id: int, body: UpdatePeerRequest, _=Depends(auth.require_ad
         )
 
     if body.enabled is True:
-        awg.add_peer_live(row["public_key"], row["preshared_key"], row["ip_address"])
+        awg.add_peer_live(row["public_key"], row["preshared_key"], row["ip_address"], row["ipv6_address"])
     elif body.enabled is False:
         awg.remove_peer_live(row["public_key"])
 
@@ -259,7 +326,7 @@ def reset_peer(peer_id: int, _=Depends(auth.require_admin)):
         )
         cur.execute("UPDATE peers SET enabled=1, expires_at=? WHERE id=?", (new_expires, peer_id))
 
-    awg.add_peer_live(row["public_key"], row["preshared_key"], row["ip_address"])
+    awg.add_peer_live(row["public_key"], row["preshared_key"], row["ip_address"], row["ipv6_address"])
     return {"ok": True, "expires_at": new_expires}
 
 
@@ -303,7 +370,7 @@ def adjust_peer(peer_id: int, body: AdjustPeerRequest, _=Depends(auth.require_ad
             cur.execute("UPDATE peers SET enabled=1 WHERE id=?", (peer_id,))
 
     if needs_reactivate:
-        awg.add_peer_live(row2["public_key"], row2["preshared_key"], row2["ip_address"])
+        awg.add_peer_live(row2["public_key"], row2["preshared_key"], row2["ip_address"], row2["ipv6_address"])
 
     return {"ok": True, "data_limit_bytes": new_limit, "expires_at": new_expires}
 
@@ -345,7 +412,7 @@ def get_peer_config(peer_id: int, _=Depends(auth.require_admin)):
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "User not found")
-    return awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"])
+    return awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"], row["ipv6_address"])
 
 
 @app.get("/api/peers/{peer_id}/qr")
@@ -355,7 +422,7 @@ def get_peer_qr(peer_id: int, _=Depends(auth.require_admin)):
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "User not found")
-    conf = awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"])
+    conf = awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"], row["ipv6_address"])
     img = qrcode.make(conf)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -384,6 +451,7 @@ def system_info(_=Depends(auth.require_admin)):
 
     return {
         "endpoint": config.SERVER_ENDPOINT,
+        "ipv6_enabled": config.ENABLE_IPV6,
         "port": config.SERVER_PORT,
         "interface": config.INTERFACE,
         "total_peers": total,
@@ -452,19 +520,24 @@ def restore_backup(
                 ip_address = database.next_free_ip(_subnet_base(), used_ips)
             used_ips.add(ip_address)
             existing_keys.add(pub)
+            # recompute IPv6 from this server's own subnet rather than trusting
+            # the source server's value (it may run a different IPv6 range,
+            # or not have IPv6 enabled at all)
+            ipv6_address = _derive_ipv6(ip_address)
 
             cur.execute(
                 """INSERT INTO peers
-                   (name, public_key, private_key, preshared_key, ip_address, note,
+                   (name, public_key, private_key, preshared_key, ip_address, ipv6_address, note,
                     enabled, created_at, expires_at, data_limit_bytes, duration_days,
                     portal_username, portal_password_hash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     p.get("name", "restored"),
                     pub,
                     p.get("private_key"),
                     p.get("preshared_key"),
                     ip_address,
+                    ipv6_address,
                     p.get("note", ""),
                     1 if p.get("enabled", True) else 0,
                     p.get("created_at", database.now()),
@@ -480,8 +553,8 @@ def restore_backup(
                 "INSERT INTO peer_stats (peer_id, cumulative_rx, cumulative_tx) VALUES (?, ?, ?)",
                 (new_id, p.get("cumulative_rx", 0), p.get("cumulative_tx", 0)),
             )
-            awg.add_peer_live(pub, p.get("preshared_key"), ip_address)
-            awg.append_peer_to_conf(pub, p.get("preshared_key"), ip_address, p.get("name", "restored"))
+            awg.add_peer_live(pub, p.get("preshared_key"), ip_address, ipv6_address)
+            awg.append_peer_to_conf(pub, p.get("preshared_key"), ip_address, p.get("name", "restored"), ipv6_address)
             imported += 1
 
         if restore_admin and payload.get("admin"):
@@ -498,12 +571,16 @@ def restore_backup(
 # self-service portal (peer-scoped, separate from admin auth)
 # ============================================================
 @app.post("/api/portal/login")
-def portal_login(body: PortalLoginRequest):
+def portal_login(body: PortalLoginRequest, request: Request):
+    key = _client_key("portal", request)
+    _check_rate_limit(key)
     with database.cursor() as cur:
         cur.execute("SELECT * FROM peers WHERE portal_username=?", (body.username,))
         row = cur.fetchone()
     if not row or not auth.verify_password(body.password, row["portal_password_hash"] or ""):
+        _record_failure(key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    _record_success(key)
     return {"token": auth.create_peer_token(row["id"])}
 
 
@@ -531,6 +608,7 @@ def portal_status(peer_id: int = Depends(auth.require_peer)):
     return {
         "name": row["name"],
         "ip_address": row["ip_address"],
+        "ipv6_address": row["ipv6_address"],
         "enabled": bool(row["enabled"]),
         "online": online,
         "used_bytes": used,
@@ -549,7 +627,7 @@ def portal_config(peer_id: int = Depends(auth.require_peer)):
         row = cur.fetchone()
     if not row:
         raise HTTPException(404, "Not found")
-    return awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"])
+    return awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"], row["ipv6_address"])
 
 
 @app.get("/api/portal/qr")
@@ -559,7 +637,7 @@ def portal_qr(peer_id: int = Depends(auth.require_peer)):
         row = cur.fetchone()
     if not row:
         raise HTTPException(404, "Not found")
-    conf = awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"])
+    conf = awg.build_client_config(row["private_key"], row["ip_address"], row["preshared_key"], row["ipv6_address"])
     img = qrcode.make(conf)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -631,6 +709,7 @@ async def enforcement_loop():
                     if expired or over_limit:
                         awg.remove_peer_live(row["public_key"])
                         cur.execute("UPDATE peers SET enabled=0 WHERE id=?", (row["id"],))
+            _cleanup_rate_limits()
         except Exception as e:
             print(f"[enforcement_loop] error: {e}")
         await asyncio.sleep(30)
