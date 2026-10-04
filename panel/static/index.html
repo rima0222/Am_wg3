@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AmneziaWG Panel</title>
-<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 
@@ -44,12 +44,16 @@
 
   <main>
     <div class="summary-strip">
-      <div class="summary-item"><span class="k">Users</span><span class="v" id="stat-total">—</span></div>
-      <div class="summary-item"><span class="k">Online</span><span class="v" id="stat-online">—</span></div>
-      <div class="summary-item v-big"><span class="k">Total traffic (all time)</span><span class="v" id="stat-traffic">—</span></div>
-      <div class="ring-stat" id="ring-today"></div>
-      <div class="ring-stat" id="ring-month"></div>
-      <svg id="sparkline" class="sparkline" width="180" height="34" viewBox="0 0 180 34"></svg>
+      <div class="summary-group">
+        <div class="summary-item"><span class="k">Users</span><span class="v" id="stat-total">—</span></div>
+        <div class="summary-item"><span class="k">Online</span><span class="v" id="stat-online">—</span></div>
+        <div class="summary-item v-big"><span class="k">Total traffic (all time)</span><span class="v" id="stat-traffic">—</span></div>
+        <svg id="sparkline" class="sparkline" width="180" height="34" viewBox="0 0 180 34"></svg>
+      </div>
+      <div class="summary-group summary-group-rings">
+        <div class="ring-stat" id="ring-today"></div>
+        <div class="ring-stat" id="ring-month"></div>
+      </div>
     </div>
 
     <div class="section-head">
@@ -240,6 +244,6 @@
   </div>
 </div>
 
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

@@ -173,7 +173,7 @@ function drawSparkline() {
 
 // ---------------- today / month usage rings ----------------
 function statRingSVG(label, valueBytes, frac, color) {
-  const size = 56, stroke = 5, r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  const size = 68, stroke = 6, r = (size - stroke) / 2, c = 2 * Math.PI * r;
   const offset = c * (1 - Math.max(0, Math.min(1, frac)));
   const parts = fmtVolumePrecise(valueBytes).split(" ");
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="ring">
@@ -181,8 +181,8 @@ function statRingSVG(label, valueBytes, frac, color) {
     <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
       stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}"
       stroke-linecap="round" transform="rotate(-90 ${size / 2} ${size / 2})"/>
-    <text x="${size / 2}" y="${size / 2 - 2}" text-anchor="middle" class="ring-main" style="font-size:9px;">${parts[0]}</text>
-    <text x="${size / 2}" y="${size / 2 + 9}" text-anchor="middle" class="ring-sub" style="font-size:6px;">${parts[1] || ""}</text>
+    <text x="${size / 2}" y="${size / 2 - 2}" text-anchor="middle" class="ring-main" style="font-size:11px;">${parts[0]}</text>
+    <text x="${size / 2}" y="${size / 2 + 11}" text-anchor="middle" class="ring-sub" style="font-size:7px;">${parts[1] || ""}</text>
   </svg><span class="ring-label">${label}</span>`;
 }
 
