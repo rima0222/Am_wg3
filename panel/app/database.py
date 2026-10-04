@@ -73,6 +73,8 @@ def init_db():
                 ip TEXT PRIMARY KEY,
                 country TEXT,
                 city TEXT,
+                lat REAL,
+                lon REAL,
                 updated_at INTEGER NOT NULL
             );
             """
@@ -86,6 +88,8 @@ def init_db():
             ("peers", "ipv6_address", "TEXT"),
             ("peers", "account_number", "INTEGER"),
             ("peers", "bandwidth_limit_kbps", "INTEGER"),
+            ("ip_geo_cache", "lat", "REAL"),
+            ("ip_geo_cache", "lon", "REAL"),
         ]
         for table, col, col_type in migrations:
             if not _column_exists(table, col):

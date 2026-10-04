@@ -168,7 +168,7 @@ def _enrich_with_geo(peers: list):
     now = database.now()
     with database.cursor() as cur:
         cur.execute(
-            f"SELECT ip, country, city, updated_at FROM ip_geo_cache WHERE ip IN ({','.join('?' * len(ips))})",
+            f"SELECT ip, country, city, lat, lon, updated_at FROM ip_geo_cache WHERE ip IN ({','.join('?' * len(ips))})",
             ips,
         )
         cached = {r["ip"]: dict(r) for r in cur.fetchall()}
@@ -180,17 +180,25 @@ def _enrich_with_geo(peers: list):
             with database.cursor() as cur:
                 for ip, info in fresh.items():
                     cur.execute(
-                        """INSERT INTO ip_geo_cache (ip, country, city, updated_at) VALUES (?, ?, ?, ?)
-                           ON CONFLICT(ip) DO UPDATE SET country=excluded.country, city=excluded.city, updated_at=excluded.updated_at""",
-                        (ip, info.get("country"), info.get("city"), now),
+                        """INSERT INTO ip_geo_cache (ip, country, city, lat, lon, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(ip) DO UPDATE SET country=excluded.country, city=excluded.city,
+                               lat=excluded.lat, lon=excluded.lon, updated_at=excluded.updated_at""",
+                        (ip, info.get("country"), info.get("city"), info.get("lat"), info.get("lon"), now),
                     )
-                    cached[ip] = {"ip": ip, "country": info.get("country"), "city": info.get("city"), "updated_at": now}
+                    cached[ip] = {
+                        "ip": ip, "country": info.get("country"), "city": info.get("city"),
+                        "lat": info.get("lat"), "lon": info.get("lon"), "updated_at": now,
+                    }
+        else:
+            print(f"[geo] no results for {stale} - geo lookup may be blocked from this server")
 
     for p in peers:
         ip = p.get("source_ip")
         entry = cached.get(ip) if ip else None
         p["source_country"] = entry["country"] if entry else None
         p["source_city"] = entry["city"] if entry else None
+        p["source_lat"] = entry["lat"] if entry else None
+        p["source_lon"] = entry["lon"] if entry else None
 
 
 # ============================================================

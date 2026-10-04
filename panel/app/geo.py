@@ -11,13 +11,15 @@ is swallowed and just means "no location shown", never a broken panel.
 import json
 import urllib.request
 
-BATCH_URL = "http://ip-api.com/batch?fields=status,country,city,query"
+BATCH_URL = "http://ip-api.com/batch?fields=status,country,city,lat,lon,query"
 MAX_BATCH = 100
 TIMEOUT = 3
 
 
 def lookup_batch(ips: list) -> dict:
-    """Returns {ip: {"country": ..., "city": ...}} for IPs it could resolve."""
+    """Returns {ip: {"country": ..., "city": ..., "lat": ..., "lon": ...}} for
+    IPs it could resolve. lat/lon let the UI link straight to a map instead
+    of a third-party IP-lookup page, which some networks block outright."""
     if not ips:
         return {}
     results = {}
@@ -35,6 +37,8 @@ def lookup_batch(ips: list) -> dict:
                     results[row["query"]] = {
                         "country": row.get("country") or None,
                         "city": row.get("city") or None,
+                        "lat": row.get("lat"),
+                        "lon": row.get("lon"),
                     }
     except Exception as e:
         print(f"[geo] lookup failed: {e}")

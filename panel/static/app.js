@@ -279,8 +279,14 @@ async function loadPeers() {
         ? `<span class="offline-duration">offline for ${fmtDuration(p.offline_seconds)}</span>`
         : "";
     const geoLabel = [p.source_city, p.source_country].filter(Boolean).join(", ");
+    // link straight to a map pin when we have coordinates - some networks block
+    // third-party "whois"-style IP lookup pages outright, Maps links rarely are
+    const geoLink =
+      p.source_lat != null && p.source_lon != null
+        ? `https://www.google.com/maps?q=${p.source_lat},${p.source_lon}`
+        : `https://www.google.com/search?q=${encodeURIComponent(p.source_ip || "")}`;
     const sourceIpNote = p.source_ip
-      ? `<div class="note">from <a href="https://ipinfo.io/${encodeURIComponent(p.source_ip)}" target="_blank" rel="noopener">${escapeHtml(p.source_ip)}</a>${geoLabel ? ` · ${escapeHtml(geoLabel)}` : ""}</div>`
+      ? `<div class="note">from ${escapeHtml(p.source_ip)}${geoLabel ? ` · <a href="${geoLink}" target="_blank" rel="noopener">${escapeHtml(geoLabel)}</a>` : ` · <a href="${geoLink}" target="_blank" rel="noopener">locate</a>`}</div>`
       : "";
 
     tr.innerHTML = `
