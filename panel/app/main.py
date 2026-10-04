@@ -96,6 +96,7 @@ class UpdatePeerRequest(BaseModel):
     note: Optional[str] = None
     expires_at: Optional[int] = None
     data_limit_gb: Optional[float] = None
+    unlimited: Optional[bool] = None  # explicit True clears the data cap (None alone is ambiguous with "unset")
 
 
 class PortalCredentialsRequest(BaseModel):
@@ -241,6 +242,18 @@ def list_peers(
             days_left = (
                 (row["expires_at"] - now) / 86400 if row["expires_at"] else None
             )
+
+            # the kernel's own view of who's actually talking to this peer right now -
+            # the real source address/port it last saw a packet from
+            raw_endpoint = live_info.get("endpoint") or ""
+            source_ip = None
+            if raw_endpoint and raw_endpoint != "(none)":
+                source_ip = raw_endpoint.rsplit(":", 1)[0].strip("[]")
+
+            offline_seconds = None
+            if not online and last_handshake:
+                offline_seconds = max(0, now - last_handshake)
+
             result.append(
                 {
                     "id": row["id"],
@@ -260,6 +273,8 @@ def list_peers(
                     "tx_bytes": row["cumulative_tx"] or 0,
                     "last_handshake": last_handshake,
                     "online": online,
+                    "offline_seconds": offline_seconds,
+                    "source_ip": source_ip,
                     "portal_username": row["portal_username"],
                 }
             )
@@ -363,11 +378,15 @@ def update_peer(peer_id: int, body: UpdatePeerRequest, _=Depends(auth.require_ad
         new_enabled = row["enabled"] if body.enabled is None else int(body.enabled)
         new_note = row["note"] if body.note is None else body.note
         new_expires = row["expires_at"] if body.expires_at is None else body.expires_at
-        new_limit = (
-            row["data_limit_bytes"]
-            if body.data_limit_gb is None
-            else int(body.data_limit_gb * 1024**3)
-        )
+
+        # `data_limit_gb: null` alone is indistinguishable from "field omitted" once it
+        # crosses JSON, so switching a user to unlimited needs its own explicit flag.
+        if body.unlimited is True:
+            new_limit = None
+        elif body.data_limit_gb is not None:
+            new_limit = int(body.data_limit_gb * 1024**3)
+        else:
+            new_limit = row["data_limit_bytes"]
 
         cur.execute(
             """UPDATE peers SET enabled=?, note=?, expires_at=?, data_limit_bytes=? WHERE id=?""",
@@ -555,6 +574,35 @@ def system_info(_=Depends(auth.require_admin)):
         "ram_percent": mem.percent,
         "ram_used_bytes": mem.used,
         "ram_total_bytes": mem.total,
+    }
+
+
+@app.get("/api/usage/summary")
+def usage_summary(_=Depends(auth.require_admin)):
+    """Server-wide traffic totals for today / this month / all time, for the
+    circular usage charts at the top of the panel."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    month_prefix = today[:7]  # YYYY-MM
+
+    with database.cursor() as cur:
+        cur.execute("SELECT rx, tx FROM daily_usage WHERE date=?", (today,))
+        row = cur.fetchone()
+        today_bytes = (row["rx"] + row["tx"]) if row else 0
+
+        cur.execute(
+            "SELECT COALESCE(SUM(rx),0) r, COALESCE(SUM(tx),0) t FROM daily_usage WHERE date LIKE ?",
+            (month_prefix + "%",),
+        )
+        mrow = cur.fetchone()
+        month_bytes = (mrow["r"] or 0) + (mrow["t"] or 0)
+
+        cur.execute("SELECT COALESCE(SUM(cumulative_rx+cumulative_tx),0) t FROM peer_stats")
+        all_time_bytes = cur.fetchone()["t"]
+
+    return {
+        "today_bytes": today_bytes,
+        "month_bytes": max(month_bytes, today_bytes),  # guard against clock/rollover edge cases
+        "all_time_bytes": all_time_bytes,
     }
 
 
@@ -757,6 +805,9 @@ async def stats_loop():
     while True:
         try:
             live = awg.dump()
+            day_str = time.strftime("%Y-%m-%d", time.gmtime())
+            day_rx_total = 0
+            day_tx_total = 0
             with database.cursor() as cur:
                 cur.execute("SELECT id, public_key FROM peers")
                 peer_map = {r["public_key"]: r["id"] for r in cur.fetchall()}
@@ -773,6 +824,10 @@ async def stats_loop():
                     new_rx, new_tx = info["rx"], info["tx"]
                     delta_rx = new_rx if new_rx < stat["last_rx"] else new_rx - stat["last_rx"]
                     delta_tx = new_tx if new_tx < stat["last_tx"] else new_tx - stat["last_tx"]
+                    delta_rx = max(delta_rx, 0)
+                    delta_tx = max(delta_tx, 0)
+                    day_rx_total += delta_rx
+                    day_tx_total += delta_tx
 
                     cur.execute(
                         """UPDATE peer_stats SET
@@ -782,14 +837,22 @@ async def stats_loop():
                            last_handshake = ?, updated_at = ?
                            WHERE peer_id = ?""",
                         (
-                            max(delta_rx, 0),
-                            max(delta_tx, 0),
+                            delta_rx,
+                            delta_tx,
                             new_rx,
                             new_tx,
                             info["latest_handshake"],
                             database.now(),
                             peer_id,
                         ),
+                    )
+
+                if day_rx_total or day_tx_total:
+                    cur.execute(
+                        """INSERT INTO daily_usage (date, rx, tx) VALUES (?, ?, ?)
+                           ON CONFLICT(date) DO UPDATE SET
+                               rx = rx + excluded.rx, tx = tx + excluded.tx""",
+                        (day_str, day_rx_total, day_tx_total),
                     )
         except Exception as e:
             print(f"[stats_loop] error: {e}")

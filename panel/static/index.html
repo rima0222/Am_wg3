@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AmneziaWG Panel</title>
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
 
@@ -46,7 +46,9 @@
     <div class="summary-strip">
       <div class="summary-item"><span class="k">Users</span><span class="v" id="stat-total">—</span></div>
       <div class="summary-item"><span class="k">Online</span><span class="v" id="stat-online">—</span></div>
-      <div class="summary-item"><span class="k">Total traffic</span><span class="v" id="stat-traffic">—</span></div>
+      <div class="summary-item v-big"><span class="k">Total traffic (all time)</span><span class="v" id="stat-traffic">—</span></div>
+      <div class="ring-stat" id="ring-today"></div>
+      <div class="ring-stat" id="ring-month"></div>
       <svg id="sparkline" class="sparkline" width="180" height="34" viewBox="0 0 180 34"></svg>
     </div>
 
@@ -141,6 +143,20 @@
       <button class="btn-primary" onclick="submitAdjust()">Apply</button>
       <button class="btn-ghost" onclick="closeModal('adjust-modal')">Cancel</button>
     </div>
+
+    <div class="divider"></div>
+    <h2>Set data limit directly</h2>
+    <p class="hint">Switch this user between unlimited and a fixed cap (instead of adding/removing).</p>
+    <label style="display:flex;align-items:center;gap:6px;">
+      <input type="checkbox" id="adjust-unlimited" style="width:auto;margin:0;" onchange="onUnlimitedToggle()">
+      Unlimited (no data cap)
+    </label>
+    <label>Exact limit (GB)</label>
+    <input id="adjust-set-limit" type="number" step="0.1" placeholder="e.g. 50">
+    <div class="modal-actions">
+      <button class="btn-primary" onclick="submitSetLimit()">Save limit</button>
+      <button class="btn-ghost" onclick="closeModal('adjust-modal')">Close</button>
+    </div>
   </div>
 </div>
 
@@ -224,6 +240,6 @@
   </div>
 </div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

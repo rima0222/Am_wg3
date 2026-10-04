@@ -60,6 +60,7 @@ function showApp() {
 function refreshAll() {
   loadPeers();
   loadSystem();
+  loadUsageSummary();
 }
 
 // ---------------- formatting ----------------
@@ -84,6 +85,18 @@ function fmtDate(ts) {
   if (!ts) return "—";
   const d = new Date(ts * 1000);
   return d.toISOString().slice(0, 10);
+}
+
+// "offline for 3h" style durations
+function fmtDuration(seconds) {
+  seconds = Math.max(0, Math.floor(seconds));
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
 }
 
 function escapeHtml(str) {
@@ -156,6 +169,31 @@ function drawSparkline() {
     <polyline points="${points}" fill="none" stroke="#57e6c8" stroke-width="1.5" />
     <text x="${w - 2}" y="10" font-family="IBM Plex Mono" font-size="9" fill="#7c879b" text-anchor="end">online</text>
   `;
+}
+
+// ---------------- today / month usage rings ----------------
+function statRingSVG(label, valueBytes, frac, color) {
+  const size = 56, stroke = 5, r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  const offset = c * (1 - Math.max(0, Math.min(1, frac)));
+  const parts = fmtVolumePrecise(valueBytes).split(" ");
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="ring">
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--surface-2)" stroke-width="${stroke}"/>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+      stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}"
+      stroke-linecap="round" transform="rotate(-90 ${size / 2} ${size / 2})"/>
+    <text x="${size / 2}" y="${size / 2 - 2}" text-anchor="middle" class="ring-main" style="font-size:9px;">${parts[0]}</text>
+    <text x="${size / 2}" y="${size / 2 + 9}" text-anchor="middle" class="ring-sub" style="font-size:6px;">${parts[1] || ""}</text>
+  </svg><span class="ring-label">${label}</span>`;
+}
+
+async function loadUsageSummary() {
+  const res = await fetch("/api/usage/summary", { headers: authHeaders(false) });
+  if (!res.ok) return;
+  const s = await res.json();
+  const todayFrac = s.month_bytes > 0 ? Math.min(1, s.today_bytes / s.month_bytes) : (s.today_bytes > 0 ? 1 : 0);
+  const monthFrac = s.all_time_bytes > 0 ? Math.min(1, s.month_bytes / s.all_time_bytes) : (s.month_bytes > 0 ? 1 : 0);
+  document.getElementById("ring-today").innerHTML = statRingSVG("Today", s.today_bytes, todayFrac, "var(--accent)");
+  document.getElementById("ring-month").innerHTML = statRingSVG("This month", s.month_bytes, monthFrac, "var(--warn)");
 }
 
 // ---------------- search + sort ----------------
@@ -236,11 +274,22 @@ async function loadPeers() {
 
   for (const p of peers) {
     const tr = document.createElement("tr");
+    const offlineNote =
+      !p.online && p.offline_seconds != null
+        ? `<span class="offline-duration">offline for ${fmtDuration(p.offline_seconds)}</span>`
+        : "";
+    const sourceIpNote = p.source_ip
+      ? `<div class="note">from <a href="https://ipinfo.io/${encodeURIComponent(p.source_ip)}" target="_blank" rel="noopener">${escapeHtml(p.source_ip)}</a></div>`
+      : "";
+
     tr.innerHTML = `
       <td>
         <div class="status-cell">
           <span class="status-dot ${p.online ? "online" : "offline"}"></span>
-          ${p.online ? "online" : "offline"}
+          <div class="status-text-col">
+            <span>${p.online ? "online" : "offline"}</span>
+            ${offlineNote}
+          </div>
         </div>
       </td>
       <td class="account-cell">#${p.account_number ?? "—"}</td>
@@ -249,14 +298,14 @@ async function loadPeers() {
         <span class="name">${escapeHtml(p.name)}</span>
         <button class="label-edit-btn" onclick="openLabelModal(${p.id}, '${escapeHtml(p.note || "").replace(/'/g, "&#39;")}')">${p.note ? escapeHtml(p.note) : "+ add label"}</button>
       </td>
-      <td class="mono">${p.ip_address}${p.ipv6_address ? `<div class="note">${p.ipv6_address}</div>` : ""}</td>
+      <td class="mono">${p.ip_address}${p.ipv6_address ? `<div class="note">${p.ipv6_address}</div>` : ""}${sourceIpNote}</td>
       <td class="ring-cell">${usageRingSVG(p.used_bytes, p.data_limit_bytes)}</td>
       <td>${daysBarHTML(p)}</td>
       <td>
         <div class="actions-cell">
           <button class="btn-ghost btn-sm" onclick="viewConfig(${p.id})">Config</button>
           <button class="btn-ghost btn-sm" onclick="openCredentialsModal(${p.id}, '${escapeHtml(p.portal_username || "")}')">Login</button>
-          <button class="btn-ghost btn-sm" onclick="openAdjustModal(${p.id})">Adjust</button>
+          <button class="btn-ghost btn-sm" onclick="openAdjustModal(${p.id}, ${p.data_limit_bytes ? 1 : 0})">Adjust</button>
           <button class="btn-ghost btn-sm" onclick="resetPeer(${p.id})">Reset</button>
           <button class="btn-ghost btn-sm" onclick="toggleEnabled(${p.id}, ${!p.enabled})">${p.enabled ? "Disable" : "Enable"}</button>
           <button class="btn-danger btn-sm" onclick="deletePeer(${p.id})">Delete</button>
@@ -365,10 +414,13 @@ async function resetPeer(id) {
 }
 
 // ---------------- adjust plan ----------------
-function openAdjustModal(id) {
+function openAdjustModal(id, hasLimit) {
   currentAdjustPeerId = id;
   document.getElementById("adjust-gb").value = "";
   document.getElementById("adjust-days").value = "";
+  document.getElementById("adjust-unlimited").checked = !hasLimit;
+  document.getElementById("adjust-set-limit").value = "";
+  document.getElementById("adjust-set-limit").disabled = !hasLimit;
   document.getElementById("adjust-modal").classList.remove("hidden");
 }
 
@@ -382,6 +434,24 @@ async function submitAdjust() {
     method: "POST", headers: authHeaders(), body: JSON.stringify(body),
   });
   if (!res.ok) { const e = await res.json(); return alert(e.detail || "Adjust failed"); }
+  closeModal("adjust-modal");
+  loadPeers();
+}
+
+// ---------------- set limit directly (unlimited <-> limited toggle) ----------------
+function onUnlimitedToggle() {
+  const unlimited = document.getElementById("adjust-unlimited").checked;
+  document.getElementById("adjust-set-limit").disabled = unlimited;
+}
+
+async function submitSetLimit() {
+  const unlimited = document.getElementById("adjust-unlimited").checked;
+  const gbVal = document.getElementById("adjust-set-limit").value;
+  const body = unlimited ? { unlimited: true } : { data_limit_gb: gbVal ? parseFloat(gbVal) : 0 };
+  const res = await fetch(`/api/peers/${currentAdjustPeerId}`, {
+    method: "PUT", headers: authHeaders(), body: JSON.stringify(body),
+  });
+  if (!res.ok) { const e = await res.json(); return alert(e.detail || "Failed to update limit"); }
   closeModal("adjust-modal");
   loadPeers();
 }

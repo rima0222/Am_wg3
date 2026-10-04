@@ -62,6 +62,12 @@ def init_db():
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 endpoint TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS daily_usage (
+                date TEXT PRIMARY KEY,
+                rx INTEGER NOT NULL DEFAULT 0,
+                tx INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
 
