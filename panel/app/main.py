@@ -128,6 +128,7 @@ async def startup():
     database.init_db()
     asyncio.create_task(stats_loop())
     asyncio.create_task(enforcement_loop())
+    asyncio.create_task(geo_loop())
 
 
 def _subnet_base() -> str:
@@ -153,52 +154,82 @@ def _get_admin_row():
         return cur.fetchone()
 
 
-GEO_CACHE_TTL_SECONDS = 24 * 3600  # a given source IP rarely moves city/country
+# A source IP's city/country essentially never changes faster than this, and
+# keeping the TTL long is what keeps call volume low - see geo_loop() below
+# for why this is deliberately decoupled from the panel's 3s live poll.
+GEO_CACHE_TTL_SECONDS = 7 * 24 * 3600
+GEO_LOOKUP_INTERVAL_SECONDS = 600  # how often the background loop checks for new/stale IPs
 
 
 def _enrich_with_geo(peers: list):
-    """Attaches source_country/source_city to each peer dict in place.
-    Only ever calls the external geo API for IPs that are missing from the
-    cache or stale - a steady-state poll (the panel refreshes every few
-    seconds) does zero network calls and just reads the DB cache."""
+    """Attaches source_country/source_city/source_lat/source_lon to each peer
+    dict in place, read-only - a plain SQLite SELECT against the cache table,
+    no network I/O. This runs on every /api/peers call (the panel polls every
+    few seconds), so it must never itself reach out to the internet: that job
+    belongs to geo_loop(), which runs on its own slow, rate-limited schedule."""
     ips = sorted({p["source_ip"] for p in peers if p.get("source_ip")})
     if not ips:
         return
 
-    now = database.now()
     with database.cursor() as cur:
         cur.execute(
-            f"SELECT ip, country, city, lat, lon, updated_at FROM ip_geo_cache WHERE ip IN ({','.join('?' * len(ips))})",
+            f"SELECT ip, country, city, lat, lon FROM ip_geo_cache WHERE ip IN ({','.join('?' * len(ips))})",
             ips,
         )
         cached = {r["ip"]: dict(r) for r in cur.fetchall()}
 
-    stale = [ip for ip in ips if ip not in cached or (now - cached[ip]["updated_at"]) > GEO_CACHE_TTL_SECONDS]
-    if stale:
-        fresh = geo.lookup_batch(stale)
-        if fresh:
-            with database.cursor() as cur:
-                for ip, info in fresh.items():
-                    cur.execute(
-                        """INSERT INTO ip_geo_cache (ip, country, city, lat, lon, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-                           ON CONFLICT(ip) DO UPDATE SET country=excluded.country, city=excluded.city,
-                               lat=excluded.lat, lon=excluded.lon, updated_at=excluded.updated_at""",
-                        (ip, info.get("country"), info.get("city"), info.get("lat"), info.get("lon"), now),
-                    )
-                    cached[ip] = {
-                        "ip": ip, "country": info.get("country"), "city": info.get("city"),
-                        "lat": info.get("lat"), "lon": info.get("lon"), "updated_at": now,
-                    }
-        else:
-            print(f"[geo] no results for {stale} - geo lookup may be blocked from this server")
-
     for p in peers:
-        ip = p.get("source_ip")
-        entry = cached.get(ip) if ip else None
+        entry = cached.get(p.get("source_ip"))
         p["source_country"] = entry["country"] if entry else None
         p["source_city"] = entry["city"] if entry else None
         p["source_lat"] = entry["lat"] if entry else None
         p["source_lon"] = entry["lon"] if entry else None
+
+
+async def geo_loop():
+    """Resolves source IPs to city/country in the background, well off the
+    request path. Runs every GEO_LOOKUP_INTERVAL_SECONDS (10 min by default),
+    looks at only the IPs currently live on the interface, skips anything
+    already cached within GEO_CACHE_TTL_SECONDS (7 days), and sends the rest
+    as a single batched request - capping how often (and how much) this ever
+    calls the external geo service, so it can't get the VPS's IP rate-limited
+    or flagged, and never adds load to the admin panel's live polling."""
+    while True:
+        try:
+            live = awg.dump()
+            ips = set()
+            for info in live.values():
+                endpoint = info.get("endpoint") or ""
+                if endpoint and endpoint != "(none)":
+                    ips.add(endpoint.rsplit(":", 1)[0].strip("[]"))
+
+            if ips:
+                now = database.now()
+                with database.cursor() as cur:
+                    cur.execute(
+                        f"SELECT ip, updated_at FROM ip_geo_cache WHERE ip IN ({','.join('?' * len(ips))})",
+                        list(ips),
+                    )
+                    cached_at = {r["ip"]: r["updated_at"] for r in cur.fetchall()}
+
+                stale = [ip for ip in ips if ip not in cached_at or (now - cached_at[ip]) > GEO_CACHE_TTL_SECONDS]
+                if stale:
+                    fresh = geo.lookup_batch(stale)
+                    if fresh:
+                        with database.cursor() as cur:
+                            for ip, info in fresh.items():
+                                cur.execute(
+                                    """INSERT INTO ip_geo_cache (ip, country, city, lat, lon, updated_at)
+                                       VALUES (?, ?, ?, ?, ?, ?)
+                                       ON CONFLICT(ip) DO UPDATE SET country=excluded.country, city=excluded.city,
+                                           lat=excluded.lat, lon=excluded.lon, updated_at=excluded.updated_at""",
+                                    (ip, info.get("country"), info.get("city"), info.get("lat"), info.get("lon"), now),
+                                )
+                    else:
+                        print(f"[geo] no results for {len(stale)} IP(s) - lookup may be blocked from this server")
+        except Exception as e:
+            print(f"[geo_loop] error: {e}")
+        await asyncio.sleep(GEO_LOOKUP_INTERVAL_SECONDS)
 
 
 # ============================================================

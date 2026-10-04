@@ -153,7 +153,7 @@ header.topbar {
 .topbar-actions { display: flex; gap: 8px; }
 
 /* ---------- main ---------- */
-main { padding: 24px 22px; max-width: 1180px; margin: 0 auto; }
+main { padding: 24px 32px; max-width: 1760px; width: 96%; margin: 0 auto; }
 
 .section-head {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -182,13 +182,27 @@ main { padding: 24px 22px; max-width: 1180px; margin: 0 auto; }
 .ring-stat .ring text.ring-main { fill: var(--text); font-family: var(--mono); font-weight: 600; }
 .ring-stat .ring text.ring-sub { fill: var(--text-dim); font-family: var(--sans); }
 
-table { width: 100%; border-collapse: collapse; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 thead th {
-  text-align: left; font-size: 11px; font-weight: 500; color: var(--text-dim);
-  padding: 8px 10px; border-bottom: 1px solid var(--border);
+  text-align: left; font-size: 12px; font-weight: 500; color: var(--text-dim);
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
-tbody td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tbody td {
+  padding: 16px; border-bottom: 1px solid var(--border); vertical-align: middle;
+  font-size: 14px;
+}
 tbody tr:hover { background: var(--surface); }
+
+/* column widths, so every cell has room to stay on one line instead of
+   wrapping underneath itself */
+thead th:nth-child(1), tbody td:nth-child(1) { width: 11%; }
+thead th:nth-child(2), tbody td:nth-child(2) { width: 5%; }
+thead th:nth-child(3), tbody td:nth-child(3) { width: 20%; }
+thead th:nth-child(4), tbody td:nth-child(4) { width: 16%; }
+thead th:nth-child(5), tbody td:nth-child(5) { width: 13%; }
+thead th:nth-child(6), tbody td:nth-child(6) { width: 13%; }
+thead th:nth-child(7), tbody td:nth-child(7) { width: 22%; }
 
 .status-dot {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-left: 0;
@@ -227,7 +241,8 @@ td.mono .note a:hover { color: var(--accent); }
 .expiry-cell.warn { color: var(--warn); }
 .expiry-cell.danger { color: var(--danger); }
 
-.actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions-cell { display: flex; gap: 8px; flex-wrap: wrap; }
+.actions-cell .btn-sm { padding: 6px 12px; font-size: 12px; }
 
 /* ---------- modal ---------- */
 .modal {
