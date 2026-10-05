@@ -88,7 +88,10 @@ log "Backups: ${ENV_FILE}.bak-${STAMP}  ${CONF}.bak-${STAMP}"
 
 # ---- 3. rewrite the tunnel .conf: live values + peers rebuilt from the panel DB ----
 DB_PATH="$(envget PANEL_DB_PATH)"; DB_PATH="${DB_PATH:-${ETC_DIR}/panel.db}"
-NEW_CONF="$(mktemp)"
+# awg-quick/wg-quick only accept a path whose file name is "<iface>.conf"
+# (<=15 chars before .conf), so build the candidate inside a temp dir under that name
+TMP_DIR="$(mktemp -d)"
+NEW_CONF="${TMP_DIR}/${IFACE}.conf"
 
 LIVE_PRIV="$LIVE_PRIV" LIVE_PORT="$LIVE_PORT" \
 LIVE_JC="$LIVE_JC" LIVE_JMIN="$LIVE_JMIN" LIVE_JMAX="$LIVE_JMAX" \
@@ -142,13 +145,14 @@ print(f"[+] Rebuilt tunnel config with {count} enabled user(s) from the panel da
 PYEOF
 
 # validate before touching the real file
-if ! awg-quick strip "$NEW_CONF" >/dev/null 2>&1; then
+if ! STRIP_ERR="$(awg-quick strip "$NEW_CONF" 2>&1 >/dev/null)"; then
   err "Generated config failed validation - nothing was changed. (Backups are untouched.)"
-  rm -f "$NEW_CONF"
+  err "awg-quick said: ${STRIP_ERR}"
+  rm -rf "$TMP_DIR"
   exit 1
 fi
 install -m 600 "$NEW_CONF" "$CONF"
-rm -f "$NEW_CONF"
+rm -rf "$TMP_DIR"
 log "Tunnel config rewritten: ${CONF}"
 
 # ---- 4. fix panel.env ----
