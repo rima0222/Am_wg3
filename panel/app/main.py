@@ -126,9 +126,39 @@ class AdminCredentialsRequest(BaseModel):
 @app.on_event("startup")
 async def startup():
     database.init_db()
+    asyncio.create_task(asyncio.to_thread(sync_live_peers))
     asyncio.create_task(stats_loop())
     asyncio.create_task(enforcement_loop())
     asyncio.create_task(geo_loop())
+
+
+def sync_live_peers():
+    """Makes sure every enabled, non-expired, within-quota peer in the panel
+    DB is actually present on the live tunnel. `awg set ... peer` is
+    idempotent and doesn't reset an existing session, so this is safe to run
+    on every panel start. It heals the case where the tunnel was restarted
+    from a .conf that doesn't list some users."""
+    now = database.now()
+    with database.cursor() as cur:
+        cur.execute(
+            """SELECT p.*, COALESCE(s.cumulative_rx,0)+COALESCE(s.cumulative_tx,0) AS used
+               FROM peers p LEFT JOIN peer_stats s ON s.peer_id = p.id
+               WHERE p.enabled = 1"""
+        )
+        rows = cur.fetchall()
+
+    synced = 0
+    for row in rows:
+        if row["expires_at"] and now > row["expires_at"]:
+            continue
+        if row["data_limit_bytes"] and row["used"] > row["data_limit_bytes"]:
+            continue
+        try:
+            awg.add_peer_live(row["public_key"], row["preshared_key"], row["ip_address"], row["ipv6_address"])
+            synced += 1
+        except Exception as e:
+            print(f"[sync_live_peers] could not add {row['name']}: {e}")
+    print(f"[sync_live_peers] {synced} enabled user(s) ensured on the live tunnel")
 
 
 def _subnet_base() -> str:

@@ -51,6 +51,88 @@ if ! grep -qi ubuntu /etc/os-release; then
   warn "This script was tested on Ubuntu; it may not work on other distros."
 fi
 
+envget() { grep -E "^$1=" "${ETC_DIR}/panel.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+
+deploy_panel_code() {
+  log "Deploying panel to ${INSTALL_DIR}..."
+  SRC_DIR=""
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+  fi
+  mkdir -p "$INSTALL_DIR"
+  if [ -n "$SRC_DIR" ] && [ -d "${SRC_DIR}/panel" ]; then
+    log "Using local copy at ${SRC_DIR}"
+    cp -r "${SRC_DIR}/panel/"* "$INSTALL_DIR/"
+  else
+    # script was run standalone (curl | bash) - clone the full repo instead
+    TMP_CLONE="$(mktemp -d)"
+    log "Cloning ${REPO_URL} (${VERSION}) ..."
+    git clone --depth 1 --branch "$VERSION" "$REPO_URL" "$TMP_CLONE"
+    cp -r "${TMP_CLONE}/panel/"* "$INSTALL_DIR/"
+    rm -rf "$TMP_CLONE"
+  fi
+
+  log "Creating Python virtual environment and installing dependencies..."
+  python3 -m venv "${INSTALL_DIR}/venv"
+  "${INSTALL_DIR}/venv/bin/pip" install --upgrade pip -q
+  "${INSTALL_DIR}/venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt" -q
+}
+
+install_service_unit() {
+  log "Installing the panel service..."
+  if [ -n "${SRC_DIR:-}" ] && [ -f "${SRC_DIR}/systemd/awg-panel.service" ]; then
+    cp "${SRC_DIR}/systemd/awg-panel.service" /etc/systemd/system/awg-panel.service
+  else
+    cat > /etc/systemd/system/awg-panel.service <<EOF
+[Unit]
+Description=AmneziaWG Management Panel
+After=network.target awg-quick@${IFACE}.service
+Wants=awg-quick@${IFACE}.service
+
+[Service]
+Type=simple
+EnvironmentFile=${ETC_DIR}/panel.env
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port \${PANEL_PORT} --app-dir ${INSTALL_DIR} --ssl-keyfile ${ETC_DIR}/key.pem --ssl-certfile ${ETC_DIR}/cert.pem
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+  systemctl daemon-reload
+}
+
+# ---------- upgrade mode ----------
+# Re-running this one-liner on a server that is already set up must NEVER
+# regenerate the server keys / port / obfuscation parameters: the running
+# tunnel (and every client config already handed out) depends on them. In
+# that case only the panel code is refreshed and the service restarted.
+# Set AWG_REINSTALL=1 to force a brand-new install instead.
+if [ -f "${ETC_DIR}/panel.env" ] && [ -f "$CONF_PATH" ] && [ "${AWG_REINSTALL:-0}" != "1" ]; then
+  log "Existing installation detected - upgrading the panel code only."
+  log "Server keys, port, obfuscation settings, users and admin login are NOT touched."
+  deploy_panel_code
+  install_service_unit
+  systemctl enable awg-panel >/dev/null 2>&1 || true
+  systemctl restart awg-panel   # 'enable --now' would NOT reload new code into a running service
+
+  EXIST_ENDPOINT="$(envget AWG_ENDPOINT)"
+  EXIST_PANEL_PORT="$(envget PANEL_PORT)"
+  echo ""
+  echo "=================================================================="
+  echo "Upgrade complete (version: ${VERSION})."
+  echo "=================================================================="
+  echo "Panel:        https://${EXIST_ENDPOINT}:${EXIST_PANEL_PORT}"
+  echo "Tunnel port:  $(envget AWG_PORT)   (unchanged)"
+  echo "Panel logs:   journalctl -u awg-panel -f"
+  echo "To wipe everything and set up from scratch instead, re-run with:"
+  echo "  curl -fsSL <install.sh url> | sudo AWG_REINSTALL=1 bash"
+  exit 0
+fi
+
 log "Starting AmneziaWG Panel installation..."
 
 # ---------- 1. settings ----------
@@ -212,35 +294,17 @@ chmod 600 "$CONF_PATH"
 
 # ---------- 7. bring up the tunnel ----------
 log "Starting the ${IFACE} tunnel..."
-systemctl enable --now "awg-quick@${IFACE}" || {
+systemctl enable "awg-quick@${IFACE}" >/dev/null 2>&1 || true
+# restart (not just 'enable --now'): if a tunnel is already running from an
+# earlier install it would otherwise keep its OLD keys/port/params in memory
+systemctl restart "awg-quick@${IFACE}" || {
   err "Failed to bring up the tunnel. Check logs with:"
   echo "journalctl -u awg-quick@${IFACE} -n 50 --no-pager"
   exit 1
 }
 
 # ---------- 8. deploy panel files ----------
-log "Deploying panel to ${INSTALL_DIR}..."
-SRC_DIR=""
-if [ -n "${BASH_SOURCE[0]:-}" ]; then
-  SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
-fi
-mkdir -p "$INSTALL_DIR"
-if [ -n "$SRC_DIR" ] && [ -d "${SRC_DIR}/panel" ]; then
-  log "Using local copy at ${SRC_DIR}"
-  cp -r "${SRC_DIR}/panel/"* "$INSTALL_DIR/"
-else
-  # script was run standalone (curl | bash) - clone the full repo instead
-  TMP_CLONE="$(mktemp -d)"
-  log "Cloning ${REPO_URL} (${VERSION}) ..."
-  git clone --depth 1 --branch "$VERSION" "$REPO_URL" "$TMP_CLONE"
-  cp -r "${TMP_CLONE}/panel/"* "$INSTALL_DIR/"
-  rm -rf "$TMP_CLONE"
-fi
-
-log "Creating Python virtual environment and installing dependencies..."
-python3 -m venv "${INSTALL_DIR}/venv"
-"${INSTALL_DIR}/venv/bin/pip" install --upgrade pip -q
-"${INSTALL_DIR}/venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt" -q
+deploy_panel_code
 
 # ---------- 9. panel config + admin password hash ----------
 log "Writing panel configuration..."
@@ -300,32 +364,9 @@ EOF
 chmod 600 "${ETC_DIR}/panel.env"
 
 # ---------- 10. systemd service ----------
-log "Installing the panel service..."
-if [ -f "${SRC_DIR}/systemd/awg-panel.service" ]; then
-  cp "${SRC_DIR}/systemd/awg-panel.service" /etc/systemd/system/awg-panel.service
-else
-  cat > /etc/systemd/system/awg-panel.service <<EOF
-[Unit]
-Description=AmneziaWG Management Panel
-After=network.target awg-quick@${IFACE}.service
-Wants=awg-quick@${IFACE}.service
-
-[Service]
-Type=simple
-EnvironmentFile=${ETC_DIR}/panel.env
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port \${PANEL_PORT} --app-dir ${INSTALL_DIR} --ssl-keyfile ${ETC_DIR}/key.pem --ssl-certfile ${ETC_DIR}/cert.pem
-Restart=always
-RestartSec=3
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-fi
-
-systemctl daemon-reload
-systemctl enable --now awg-panel
+install_service_unit
+systemctl enable awg-panel >/dev/null 2>&1 || true
+systemctl restart awg-panel
 
 # ---------- 11. firewall ----------
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
